@@ -3,7 +3,9 @@
 This repository contains the scripts required to reproduce analyses, results and figures from the publication *Shedding light on changes in subjective experience during an intensive contemplative retreat: the Lyon Assessment of Meditation Phenomenology (LAMP) questionnaire* in Biological Psychiatry Global Open Science ([link to open access publication](10.1016/j.bpsgos.2025.100474)).
 
 **Publication authors:** Oussama Abdoun, Arnaud Poublan, Stéphane Offort, Giuseppe Pagnoni, Antoine Lutz
+
 **Script authors:** Oussama Abdoun, Arnaud Poublan
+
 **Script maintainer:** Oussama Abdoun
 
 # Steps
