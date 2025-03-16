@@ -1,0 +1,2099 @@
+---
+title: "A journey within"
+author: "Oussama Abdoun"
+filters:
+   - lightbox
+lightbox:
+  match: auto
+  effect: zoom
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-expand: 2
+    fig-format: png
+    fig-dpi: 1000
+    fig-width: 7.5
+    page-layout: full
+execute:
+  cache: true
+  
+editor: visual
+---
+
+# Prepare
+
+## Libraries
+
+```{r, cache=FALSE}
+
+library(tictoc)  
+
+# Statistics & modeling
+library(pwr)
+library(car)
+library(emmeans)
+library(broom)
+library(correlation)
+library(lme4)
+library(lmerTest)
+library(mgcv)
+library(gratia)
+library(ggeffects)
+
+library(gbmt)
+
+# Tables
+library(gtsummary)  # for summary tables of statistical models
+library(gt)         # for table
+library(weights)    # for the rd() function that rounds numbers to text while dropping leading zeros
+
+# Plotting
+library(pals)       # colormaps
+library(ggh4x)      # advanced manipulation of ggplot layers
+library(patchwork)  # assemble multiple subplots
+library(showtext)   # for using extra fonts in pdfs
+
+# Data manipulation
+library(magrittr)   # advanced pipe operators such as %<>%
+library(tidyverse)
+
+# Global options
+# --- make emmeans() always provide both confidence intervals and p-values
+emm_options(emmeans = list(infer = c(T,T)))
+# --- suppress information messages from dplyr::summarise()
+options(dplyr.summarise.inform = FALSE)
+
+```
+
+## Theme
+
+```{r, cache=FALSE}
+
+# Tricks to include any font in pdf output (here, Ubuntu Condensed for dimensions names)
+# See: https://r-graphics.org/recipe-output-fonts-pdf
+# --- using the extrafont package
+extrafont::loadfonts()
+# --- using the showtext library: the output files are too heavy
+# See: https://cran.rstudio.com/web/packages/showtext/vignettes/introduction.html
+# font_add_google("Ubuntu Condensed")
+# showtext_auto() 
+
+theme_set(theme_minimal())
+
+theme_update(plot.background = element_rect(fill="white", color = NA), # to avoid transparency against black background in lightbox displays
+             plot.title = element_text(size = 10),
+             legend.title = element_text(size = 8),
+             legend.text = element_text(size = 6),
+             axis.title = element_text(size = 8),
+             axis.text = element_text(size = 6),
+             axis.text.x = element_text(margin = margin(t = -1, r = 0, b = 0, l = 0)),
+             axis.text.y = element_text(margin = margin(t = 0, r = -1, b = 0, l = 0)),
+             plot.tag.position = c(0, 1),
+             plot.tag = element_text(face = "bold", size = 12, hjust = 1, vjust = 1))
+
+# Colors of practice styles
+labels.family <- c("FA (bodily)", "FA (external)", "FA (mental)", "OM", "Compassion", "Mindful movement")
+okabe <- pals::okabe()
+cols.family = c(FA_bodily = okabe[7], FA_external = okabe[2], FA_mental = okabe[5],
+                OM = okabe[3], Compassion = okabe[8], MvtMedit = "grey50", `NA` = "grey80")
+
+# Colors of 3 gbmt clusters
+cols.clusters <- c(A="darkgoldenrod3", B="cyan4", C="tomato3")
+
+```
+
+## Functions
+
+```{r, cache=FALSE}
+
+source(file = "fun_gamm.R")
+source(file = "fun_gbmt.R")
+
+## Function to augment dataframes with metadata of pheno dimensions (psychological domain, index within domain, etc.)
+add_info <- function(data) {
+  data %>%
+    mutate(label = df.variables[variable,"label"] %>%
+             str_replace("d thoughts", "d")) %>%
+    mutate(domain = df.variables[variable,"domain"]) %>%
+    mutate(number = df.variables[variable,"number"]) %>%
+    mutate(idx = df.variables[variable,"idx"]) %>%
+    mutate(domain = factor(domain, levels = list.domains.ordered)) # %>% ungroup #dense_rank(number)
+}
+
+
+## Function to post-process significance values from a lm(er) model
+lmer_signif <- function(data) {
+  data %>% 
+    # --- some wrangling
+    rename(p = `Pr(>|t|)`) %>%
+    select(predictor,dim,p) %>% 
+    filter(!grepl("Intercept",predictor)) %>% # remove rows pertaining to the intercept
+    mutate(signif = p.to.sym(p)) %>% # significance symbols
+    arrange(predictor) %>% 
+    # --- correction for multiple comparison
+    group_by(predictor) %>% 
+    mutate(p.holm = p.adjust(p, method = "holm"),
+           signif.holm = p.to.sym(p.holm))
+}
+```
+
+## Data
+
+```{r, cache=FALSE}
+
+# Load & do some preprocessing
+source(file = "load_data.R")
+
+
+# Initialize lists of models
+m.gamm <- list()
+m.pain <- list()
+
+# Initialize dataframes of models output
+df.smooths <- list()
+df.smooths.subj <- list()
+df.signif <- list()
+```
+
+## Variables
+
+```{r, cache=FALSE}
+
+## All pheno dimensions
+source(file = "load_variables.R")
+
+## PMM dimensions
+list.vars.pmm <- c("MetaAwareness", "Dereification1",
+                    "MentalEffort", "Stability", "Vividness", "Aperture")
+
+labels.pmm <- c("Meta-awareness", "Dereification\n(- Subjective realism)", "Mental effort", "Stability", "Clarity", "Aperture\n(- Attentional focus)")
+names(labels.pmm) <- list.vars.pmm
+
+## Pain scales
+list.vars.pain <- grep("^Pain", names(df), value = T)
+
+## Pain-related pheno dimensions
+list.vars.corr <- c("SeriousMedit","Doubt.Skills","Doubt.Practice", "Equanimity","Dereification2", "Dereification1","MetaAwareness","Impulses", "Stability", "MWstickiness")
+
+```
+
+# Timeline of practices
+
+## Function
+
+```{r}
+# Function to add aesthetics common to both plots (figure & supplementary figure 1)
+add_aesthetics_common <- function(gg) {
+  gg + scale_x_continuous(breaks = 1:10, expand = expansion(0,0)) +
+    scale_fill_discrete(type = cols.family,
+                        labels = labels.family) +
+    scale_color_discrete(type = cols.family,
+                        labels = labels.family) +
+    coord_cartesian(clip = "off")
+}
+```
+
+## **Figure 1**: all retreats combined
+
+```{r, fig.width=5.6, fig.height=3}
+
+# Pivot longer
+df.tmp <- df %>% 
+  select(day,FA_bodily:MvtMedit) %>%  
+  drop_na %>% group_by(day) %>% mutate(n.tot = n()) %>% 
+  gather(family, weight, -day,-n.tot) %>% 
+  mutate(family = factor(family, levels = names(cols.family))) 
+
+
+
+# Plot prevalence of practice styles across all sessions
+df.plot.all <- df.tmp %>% 
+  group_by(day, family) %>% summarise(weight = sum(weight, na.rm=T),
+                                      n.tot = mean(n.tot)) %>% 
+  mutate(perc = 100*weight/n.tot)
+
+df.plot.all %>% 
+  ggplot(aes(x = day, y = perc, fill = family)) +
+  facet_grid(family ~ .) +
+  geom_col() +
+  geom_text(aes(x = day, label = paste0(round(perc),"%")), #inherit.aes = F,
+            hjust = 0.5, vjust = -0.5, size = 2.1) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  labs(x = "Retreat day", title = 'All sessions') +
+  theme(plot.title = element_text(margin = margin(0,0,4,0,"mm")),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        strip.text = element_blank()) -> g.all
+
+
+# Plot prevalence of practice styles in pure sessions only
+df.plot.pure <- df.tmp %>% 
+  filter(weight == 1) %>% 
+  count(day,n.tot,family) %>%
+  mutate(n.tot.pure = sum(n),
+         perc = 100*n.tot.pure/n.tot)
+  
+# bind_rows(df.plot.all, df.plot.pure) %>% 
+df.plot.pure %>% 
+  ggplot(aes(x = day, y = n, fill = family)) +
+  geom_col() +
+  
+  geom_text(data = ~ select(., day, n.tot.pure, perc) %>% distinct,
+            aes(x = day, label = paste0(round(perc),"%"), y = n.tot.pure), inherit.aes = F,
+            hjust = 0.5, vjust = -0.5, size = 2.1) +
+  
+  labs(x = "Retreat day", y = "Total number of sessions", title = 'Single-practice ("pure") sessions') +
+  scale_y_continuous(breaks = scales::pretty_breaks((5)), expand = expansion(add=c(0,30))) -> g.pure
+    
+  
+## Assemble
+add_aesthetics_common(g.all) + guides(fill="none") + 
+  add_aesthetics_common(g.pure) + guides(fill = guide_legend(ncol = 2)) +
+  plot_annotation(tag_levels = "A") +
+  plot_layout(widths = c(1, 1.2)) &
+    
+    theme(panel.grid = element_blank(),
+          legend.title = element_blank(),
+          legend.box.spacing = unit(0,"mm"),
+          legend.key.size = unit(4,"mm"),
+          legend.text = element_text(margin = margin(l=1, r=2, unit="mm")),
+          legend.key.spacing.x = unit(-1,"mm"),
+          legend.key.spacing.y = unit(1,"mm"),
+          legend.position = "inside",
+          legend.justification = c(1.2,1)) -> g
+
+g
+
+ggsave(g, filename = "../figures/fig1.pdf", width = 140, height = 80, units = "mm")
+
+
+```
+
+### Poster version
+```{r, fig.width=6, fig.height=2}
+## Plot for poster
+df.plot.all %>%
+  filter(!(family %in% c("Compassion","MvtMedit"))) %>% 
+  ggplot(aes(x = day, y = perc, color = family)) +
+  # facet_grid(family ~ .) +
+  # geom_line(size = 0.5) +
+  geom_smooth(size = 1.5, se = F) +
+  # geom_text(aes(x = day, label = paste0(round(perc),"%")), #inherit.aes = F,
+  #           hjust = 0.5, vjust = -0.5, size = 2.1) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  labs(x = "Retreat day") +
+  guides(color="none") +
+  theme(plot.title = element_text(margin = margin(0,0,4,0,"mm")),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        strip.text = element_blank(),
+        panel.grid = element_blank()) -> g.poster
+
+g.poster %<>% add_aesthetics_common
+
+# ggsave(g.poster, filename = "../figures/fig1_poster.png", width = 6, height = 2, units = "in", dpi = 600)
+
+
+
+df.plot.all %>%
+  # filter(!(family %in% c("Compassion","MvtMedit"))) %>% 
+  mutate(family = ifelse(family %in% c("Compassion","MvtMedit"), NA, as.character(family))) %>% 
+  # group_by(day,family) %>% mutate(perc = sum(perc)) %>% 
+  ggplot(aes(x = day, y = perc, fill = family)) +
+  # facet_grid(family ~ .) +
+  # geom_line(size = 0.5) +
+  # geom_smooth(size = 1.5, se = F) +
+  geom_col(width=0.95) +
+  # geom_text(aes(x = day, label = paste0(round(perc),"%")), #inherit.aes = F,
+  #           hjust = 0.5, vjust = -0.5, size = 2.1) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  labs(x = "Retreat day") +
+  # guides(color="none", fill = "none") +
+  theme(plot.background = element_blank(),
+        plot.title = element_text(margin = margin(0,0,4,0,"mm")),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        strip.text = element_blank(),
+        panel.grid = element_blank()) +
+  theme(legend.position = "top",
+        legend.text = element_text(size = 8),
+        legend.title = element_blank(),
+        legend.box.margin = margin(b = -15)) -> g.poster2
+
+g.poster2 %<>% add_aesthetics_common
+g.poster
+
+# ggsave(g.poster2, filename = "../figures/fig1_poster2.png", width = 6, height = 2, units = "in", dpi = 600)
+
+
+```
+
+## **Supplementary figure S1**: by retreat
+
+```{r, fig.width=7.48, fig.height=3}
+
+# Pivot longer
+df.tmp <- df %>% 
+  select(retreat,day,FA_bodily:MvtMedit) %>%  
+  drop_na %>% group_by(retreat,day) %>% mutate(n.tot = n()) %>% 
+  gather(family, weight, -retreat,-day,-n.tot) %>% 
+  mutate(family = factor(family, levels = names(cols.family))) 
+
+
+# Function to add aesthetics common to both plots
+add_aesthetics_common <- function(gg) {
+  gg + scale_x_continuous(breaks = 1:10, expand = expansion(0,0)) +
+    scale_fill_discrete(type = cols.family,
+                        labels = labels.family) +
+    coord_cartesian(clip = "off")
+}
+
+# Plot prevalence of practice styles across all sessions
+df.plot.all <- df.tmp %>% 
+  group_by(retreat, day, family) %>% summarise(weight = sum(weight, na.rm=T),
+                                               n.tot = mean(n.tot)) %>% 
+  mutate(perc = 100*weight/n.tot)
+
+df.plot.all %>% 
+  ggplot(aes(x = day, y = perc, fill = family)) +
+  facet_grid(retreat ~ family) +
+  geom_col() +
+  geom_text(aes(x = day, label = paste0(round(perc),"")), #inherit.aes = F,
+            hjust = 0.5, vjust = -0.5, size = 2.) +
+  geom_text(data = tibble(retreat = 1:3,
+                          label = paste0("retreat #", 1:3),
+                          family = factor("MvtMedit", levels = names(cols.family))),
+            aes(label = label), inherit.aes = F,
+            x = Inf, hjust =1, y = Inf, vjust = 3) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  guides(fill = guide_legend(nrow = 1)) +
+  labs(x = "Retreat day") +
+  theme(plot.title = element_text(margin = margin(0,0,4,0,"mm")),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        strip.text = element_blank(),
+        legend.position = "bottom") -> g
+
+add_aesthetics_common(g) +
+  
+  theme(panel.grid = element_blank(),
+        legend.title = element_blank(),
+        legend.box.spacing = unit(0,"mm"),
+        legend.key.size = unit(4,"mm"),
+        legend.text = element_text(margin = margin(l=1, r=2, unit="mm")),
+        legend.key.spacing.x = unit(-1,"mm"),
+        legend.key.spacing.y = unit(1,"mm")) -> g
+
+g
+
+ggsave(g, filename = "../figures/suppfig1.pdf", width = 190, height = 80, units = "mm")
+
+```
+
+# Dynamics of phenomenological dimensions
+
+## GAMM modeling
+
+### Model fitting
+
+```{r}
+tic()
+m.gamm[["time.fsfs"]] <- gam_fit(df,
+                                 formula = "~ s(day) + s(session, k=8) + s(day, subject, bs='fs', m=1) + s(session, subject, bs='fs', k=8, m=1)",
+                                 list.vars = rownames(df.variables),
+                                 fun = bam, 
+                                 method = "fREML", discrete = T,
+                                 print.var = TRUE)
+toc() # ~260s
+```
+
+### Extract global smooths & significance
+
+```{r}
+set <- "time.fsfs"
+
+# --- Extract marginal means from models
+tic()
+df.smooths[[set]] <- bind_rows(
+  gam_emmeans(m.gamm[[set]], smooths = 1, terms = list(day = seq(1,10,0.5))),
+  gam_emmeans(m.gamm[[set]], smooths = 2, terms = list(session = 1:8))
+)
+toc() # ~220s
+
+# --- Extract significance
+df.signif[[set]] <- gam_signif(m.gamm[[set]], smooths = c(1,2,3), method = "fdr", family = "smooth")
+
+# --- Add metadata to pheno dimensions
+df.smooths[[set]] %<>% add_info()
+df.signif[[set]] %<>% add_info()
+
+# --- Exponentiate MW duration (predicted mean + confidence limits)
+df.smooths[[set]] %<>% 
+  mutate(across(c("predicted", starts_with("conf.")),
+                ~map2_dbl(.,variable, .f=function(input,var){ifelse(var=="MWduration", exp(input), input)})))
+```
+
+### Extract individual smooths
+
+**Note:** The extracted individual smooths are *deviations* from the global (fixed effect) smooth and therefore need to be adjusted accordingly.
+
+```{r}
+
+set <- "time.fsfs"
+
+# --- extract individual smooths
+tic()
+df.smooths.subj[[set]] <- tibble()
+
+for (vv in names(m.gamm[[set]])) {
+  
+  df.smooths.subj[[set]] %<>% bind_rows(
+    # --- day smooths
+    gratia::smooth_estimates(m.gamm[[set]][[vv]], smooth = "s(day,subject)", n = 10) %>% 
+      as.data.frame() %>% 
+      rename(pred.subject = est,
+             x = day) %>% 
+      mutate(variable = vv,
+             smooth = "s(day)"),
+    # --- session smooths
+    gratia::smooth_estimates(m.gamm[[set]][[vv]], smooth = "s(session,subject)", n = 8) %>% 
+      as.data.frame() %>% 
+      rename(pred.subject = est,
+             x = session) %>% 
+      mutate(variable = vv,
+             smooth = "s(session, k = 8)")
+  )
+}
+# --- remove unnecessary columns
+df.smooths.subj[[set]] %<>% select(-c(type,by,se))
+toc() # ~6s
+
+# --- concatenate with group mean + adjust individual data
+df.smooths.subj[[set]] %<>% arrange(subject) %>% 
+  left_join(df.smooths[[set]] %>%
+              # filter(smooth == "s(day)") %>%
+              rename(pred.group = predicted),
+            by = c("smooth", "x","variable")) %>% 
+  mutate(pred.subject = pred.subject + pred.group)
+
+```
+
+### Extract individual smooths v2
+
+Individual smooths from the multilevel model
+
+```{r}
+#| eval: false
+#| include: false
+
+list.subjects <- df$subject %>% unique
+df.smooths.subj.v2 <- tibble()
+tic()
+for (vv in setdiff(rownames(df.variables), df.smooths.subj.v2$variable %>% unique)) {
+  print(vv)
+  
+  for (ss in list.subjects) {
+    
+    df.subj <- filter(df, subject == ss)
+    n.days <- length(df.subj$day %>% unique)
+    n.sess <- length(df.subj$session %>% unique)
+    
+    if (sd(df.subj[[vv]], na.rm=T) > 0 & any(!is.na(df.subj[[vv]]))) {
+      try(
+        m.tmp <- gam_fit(df.subj,
+                         formula = paste0("~ s(day, k=", n.days-1, ") + s(session, k=", n.sess-1, ")"),
+                         list.vars = list(vv),
+                         fun = gam, 
+                         method = "REML", 
+                         print.var = FALSE)
+      )
+        
+        df.smooths.subj.v2 %<>% bind_rows(
+          m.tmp[[vv]] %>% ggemmeans(terms = list(day = 1:10)) %>% 
+            as_tibble() %>% mutate(smooth = "s(day)", variable = vv, subject = ss, .before = x),
+          m.tmp[[vv]] %>% ggemmeans(terms = list(session = 1:8)) %>% 
+            as_tibble() %>% mutate(smooth = "s(session, k = 8)", variable = vv, subject = ss, .before = x)
+        )
+    }
+  }
+}
+toc() # ~260s
+
+(df.smooths.subj.v2 %>% filter(variable=="ThoughtsPast"))$subject %>% unique()
+
+```
+
+### Effect sizes
+
+```{r}
+set <- "time.fsfs"
+
+# --- calculate "inter-individual" (robustness/consistency) effect size
+df.cohend <- df.smooths.subj[[set]] %>% 
+  group_by(smooth, subject, variable) %>% 
+  mutate(which.min.s = which.min(pred.subject), which.max.s = which.max(pred.subject),
+         min.s = min(pred.subject), max.s = max(pred.subject),
+         diff.s = sign(which.max.s-which.min.s)*(max.s-min.s),
+         which.min.g = which.min(pred.group), which.max.g = which.max(pred.group),
+         min.g = min(pred.group), max.g = max(pred.group),
+         diff.g = sign(which.max.g-which.min.g)*(max.g-min.g),
+         .keep = "none") %>% 
+  distinct() %>% arrange(variable,smooth) %>%
+  group_by(smooth, variable) %>% summarise(d = mean(diff.g)/sd(diff.s)) %>% 
+  arrange(smooth, desc(abs(d))) %>% 
+# --- append significance
+  left_join(df.signif[[set]], by=c("smooth","variable"))
+
+# --- calculate theoretical power afforded by actual sample size
+d.pwr80 <- pwr.t.test(n = length(unique(df$subject)), power = 0.8, type = "paired")$d
+d.pwr90 <- pwr.t.test(n = length(unique(df$subject)), power = 0.9, type = "paired")$d
+```
+
+## GBMT modeling
+
+### Model fitting
+
+```{r}
+
+set <- "time.fsfs"
+
+## Preparatory steps
+
+# --- exclude from clustering, variables that were not even close to significance
+list.vars.exclude <- (df.signif[[set]] %>% filter(smooth == "s(day)", p > 0.10))$variable
+list.reverse <- c("PainIntensity","PainUnpleasantness","Tension","Restlessness","Sleep","PhysicalEffort","MentalEffort","Aperture","MWstickiness","MWduration","Dereification2","ThoughtsPast","ThoughtsWorldly")
+
+# --- prepare data
+df.smooth.gbtm <- df.smooths[[set]] %>%
+  # --- keep only necessary rows & columns
+  filter(smooth == "s(day)") %>% 
+  select(variable, x, predicted) %>%
+  # --- exlude non-significant variables
+  filter(!(variable %in% list.vars.exclude)) %>%
+  # --- pivot variables wider
+  spread(variable, predicted) %>% 
+  # --- reverse some variables
+  mutate(across(setdiff(list.reverse, list.vars.exclude), ~.*(-1))) %>% 
+  # --- pivot variables longer
+  gather(variable, fitted, -x) %>% 
+  as.data.frame() 
+
+## Model fitting
+# --- initialize
+m.gbtm <- list()
+df.gbtm.ic <- tibble()
+
+# --- fit fourth-degree polynomials for various cluster numbers
+for (d in 4) {
+  for (ng in 1:8) {
+    
+    m.gbtm[[as.character(d)]][[ng]] <- gbmt(data = df.smooth.gbtm,
+                         unit = "variable", time = "x", x.names = "fitted",
+                         scaling = 2, ng = ng, d = d, pruning = F, quiet = F)
+    
+    df.gbtm.ic <- bind_rows(df.gbtm.ic,
+                            m.gbtm[[as.character(d)]][[ng]]$ic %>%
+                              as.list() %>% as_tibble() %>%
+                              mutate(ngroups = ng, degree = d))
+  }
+}
+
+# Select optimal degrees & class number
+d <- "4"; ng <- 5 # with scaling = 2
+
+# Quick visualization
+plot(m.gbtm[[d]][[ng]]); m.gbtm[[d]][[ng]] %>% print; m.gbtm[[d]][[ng]]$posterior
+
+```
+
+### **Supplementary figure S2**: information criteria of GBMT models
+
+```{r}
+
+# --- plot
+g <- gbmt.plot(df.gbtm.ic)
+g
+
+# --- save
+ggsave(plot = g, filename = "../figures/suppfig2.pdf", dpi = 300,
+       width = 90, height = 60, units = "mm")
+ggsave(plot = g, filename = "../figures/suppfig2.png", dpi = 600,
+       width = 90, height = 60, units = "mm")
+
+```
+
+### Extract trajectories
+
+```{r}
+
+class.reorder <- c(1,3,4,2,5)
+
+## Class trajectories
+
+# --- extract
+df.plot.traj <- tibble()
+class.names <- c("linear", "early", "transient", "late", "biphasic")
+for (cc in (1:5)) {
+  
+  df.plot.traj %<>% bind_rows(
+    predict(m.gbtm[[d]][[ng]])[[class.reorder[cc]]]$fitted %>% 
+    as_tibble() %>%
+    mutate(day = seq(1,10,0.5)) %>% 
+    # rownames_to_column("day") %>% mutate(day = as.numeric(day)) %>% 
+    mutate(class = cc,
+           label = class.names[cc])
+  )
+}
+
+## Variable names in a class x domain format
+df.gbtm.assign <- m.gbtm[[d]][[ng]]$assign %>%
+  as.data.frame() %>%
+  rename(class = ".") %>%
+  mutate(class = map_dbl(class, .f=\(x){which(class.reorder == x)})) %>%
+  rownames_to_column("variable")
+
+## Combine with smooth data
+df.plot.gbtm <- left_join(df.gbtm.assign,
+                          df.smooths[[set]] %>% mutate(domain = factor(domain, levels = list.domains.ordered))) %>% 
+  group_by(class) %>% mutate(idx = dense_rank(paste0(as.numeric(domain),number))) %>% ungroup() %>%
+  mutate(across(c(class,idx), ~as.factor(.)))
+
+```
+
+## **Figure 2**: time courses across retreat
+
+```{r, fig.height=7.48, fig.width=7.48}
+
+set <- "time.fsfs"
+
+smooth.name <- c("s(day)", "s(session, k = 8)")
+title.x <- c("Retreat day", "Daily session index")
+filename <- c("fig_gamm_days", "fig_gamm_sessions") 
+expansion.top <- 0.3
+
+add_type.by.idx <- function(data, type) {
+  data %<>% 
+    mutate(type = type) %>% 
+    mutate(type.by.idx = factor(interaction(idx,type),
+                                levels = paste(rep(1:9, each = 2), c("effectsize","smooth"), sep = ".")))
+}
+
+s <- 1
+  
+## Prepare data
+df.plot <- df.smooths[[set]] %>% 
+  filter(smooth == smooth.name[s]) %>% 
+  add_type.by.idx("smooth") %>% 
+  # --- add emphasis to variable label for those cited in main text
+  mutate(highlight.frame.size = ifelse(label %in% c("Engagement","Drowsiness","Mental effort","State stability",
+                                        "Insight (depth)","Pain unpleasantness"), 0.2, 0.2))
+  
+# --- change time orientation label # !!! REMOVE
+df.plot %<>% mutate(domain = recode(domain, "Time orientation" = "Temporal\norientation"))
+
+df.plot.signif <- df.signif[[set]] %>% 
+  filter(smooth == smooth.name[s]) %>% 
+  add_type.by.idx("smooth")
+
+df.cohend.plot <- df.cohend %>% 
+  filter(smooth == smooth.name[s]) %>% 
+  mutate(d.rescaled = (10-1)*abs(d)/3+1) %>% 
+  mutate(d.rescaled = ifelse(d.rescaled < 6, d.rescaled, 6)) %>% 
+  add_type.by.idx("effectsize") %>% 
+  mutate(rank = rank(desc(abs(d)))) %>% 
+  mutate(domain = recode(domain, "Time orientation" = "Temporal\norientation")) # !!! REMOVE
+
+list.es.facets <- (df.cohend.plot %>% mutate(fullfacets = interaction(domain,type.by.idx)))$fullfacets
+n.dims <- nrow(df.cohend.plot)
+
+
+## Plot
+df.plot %>% 
+  ggplot(aes(x = x, y = predicted, color = domain, fill = domain)) +
+  
+  ggh4x::facet_grid2(type.by.idx ~ domain, scale = "free", independent = "all", 
+                     axes = "all", remove_labels = "x", render_empty = FALSE,
+                     strip = ggh4x::strip_vanilla(clip = "off")) +
+  
+  ## Smooths
+  # --- display even nearly significant smooths as continuous lines
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), color = NA, alpha = 0.2) +
+  geom_line(data = ~ left_join(., df.plot.signif) %>% filter(p < .10)) +
+  
+  # --- display non-nearly significant smooths as dashed
+  geom_line(data = ~ left_join(., df.plot.signif) %>% filter(p > .10), linetype = 2) +
+  
+  # --- fade non-fdr-significant smooths
+  geom_rect(data = df.plot.signif %>% filter(p.corr > .05),
+            aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf), inherit.aes = FALSE,
+            colour = NA, fill = "white", alpha = .7) +
+  
+  # --- frame facets in a box
+  geom_rect(data = ~ distinct(select(., label,domain,type.by.idx,highlight.frame.size)), 
+            aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf, size = highlight.frame.size), inherit.aes = FALSE,
+            colour = "black", fill = NA, show.legend = FALSE) +
+  scale_size_identity() +
+  
+  
+  ## Cohen's d in lollipop style
+  geom_point(data = df.cohend.plot,
+             aes(x = d.rescaled, y = 2), size = 1) +
+  geom_segment(data = df.cohend.plot,
+               aes(x = d.rescaled, xend = 1, y = 2)) +
+  geom_text(data = df.cohend.plot,
+            aes(x = d.rescaled, y = 2,
+                label = paste0(formatC(abs(d), digits=2, format="f"),
+                               " (#", rank,")")
+                ),
+            color = "black", hjust = -0.1, vjust = 0.5, size = 2) +
+  
+  ## Variable name
+  geom_text(data = df.cohend.plot,
+            aes(x = mean(min(df.plot$x):max(df.plot$x)), y = 3, label = label),  
+            hjust = 0.5, vjust = 0, size = 3.2, family = "Ubuntu Condensed") +
+  
+  ## Aesthetics
+  scale_x_continuous(breaks = min(df.plot$x):max(df.plot$x),
+                     expand = expansion(0,0)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(3),
+                     expand = expansion(mult = c(.05,.05))) +
+  
+  ggh4x::facetted_pos_scales(
+    
+    x = list(
+      # --- no breaks for effect size facets
+      (grepl("effectsize",type.by.idx)) ~ # & paste(domain, type.by.idx, sep = ".") %in% list.es.facets
+        scale_x_continuous(breaks = c(),
+                     expand = expansion(0,0))
+    ),
+    
+    y = list(
+      
+      # --- percentage scales for percentage dimensions
+      (domain == "Conative" & grepl("smooth",type.by.idx) & str_extract(type.by.idx, "[1-9]{1}") %in% c(1,3)) |
+        (domain == "Attentional" & grepl("smooth",type.by.idx) & str_extract(type.by.idx, "[1-9]{1}") %in% c(1,2)) ~
+        scale_y_continuous(breaks = scales::pretty_breaks(3),
+                           expand = expansion(mult = c(0.05, 0.05)),
+                           labels = scales::percent_format(scale = 1),
+        ),
+      
+      # --- percentage scales for binary dimensions
+      (domain == "Temporal\norientation" & grepl("smooth",type.by.idx) & str_extract(type.by.idx, "[1-9]{1}") %in% c(1,3,4)) |
+      (domain == "Mental content" & grepl("smooth",type.by.idx) & str_extract(type.by.idx, "[1-9]{1}") %in% c(3,4)) |
+        (domain == "Affective" & grepl("smooth",type.by.idx) & str_extract(type.by.idx, "[1-9]{1}") %in% c(1,2)) |
+        (domain == "Meta-cognitive" & grepl("smooth",type.by.idx) & str_extract(type.by.idx, "[1-9]{1}") %in% c(5))  ~
+        scale_y_continuous(breaks = scales::pretty_breaks(3),
+                           expand = expansion(mult = c(0.05, 0.05)),
+                           labels = scales::percent_format(scale = 100)
+        ),
+      
+      # --- ordinal scale for temporal depth
+      (domain == "Temporal\norientation" & grepl("smooth",type.by.idx) & str_extract(type.by.idx, "[1-9]{1}") %in% c(2)) ~
+        scale_y_continuous(breaks = 2:5, labels = c("dy","wk","mo","yr"),
+                           expand = expansion(mult = c(0.05, 0.05)),
+        ),
+      
+      # --- "Future depth": force larger y span so that at least 2 breaks are visible 
+      (domain == "Temporal\norientation" & grepl("smooth",type.by.idx) & str_extract(type.by.idx, "[1-9]{1}") %in% c(5)) ~
+        scale_y_continuous(limits = c(1.9,3.1), breaks = 2:3, labels = c("dy","wk"),
+                           expand = expansion(mult = c(0, 0)),
+        ),
+      
+      # --- y-axis labels for effect size facets
+      (grepl("effectsize",type.by.idx) & paste(domain, type.by.idx, sep = ".") %in% list.es.facets) ~
+        scale_y_continuous(breaks = 2, labels = "d",#breaks = c(0.5,2), labels = c("R2","d"),
+                           limits = c(1,5))
+    )
+  ) +
+  
+  scale_color_manual(values = cols.domains) +
+  scale_fill_manual(values = cols.domains) +
+  guides(color = "none", fill = "none") +
+  coord_cartesian(xlim = c(1,10), clip = "off") +
+  
+  labs(x = title.x[s], y = "Rating") +
+  
+  theme_minimal() +
+  theme(strip.text.x = element_text(size = 9.5, face = "bold", margin = margin(b=0, unit="mm")),
+        strip.text.y = element_blank(),
+        strip.clip = "off",
+        panel.spacing.y = unit(-1, "mm"),
+        axis.ticks.x = element_line(color = "black", linewidth = 0.2),
+        axis.ticks.length = unit(0.5, "mm"),
+        axis.title.y = element_blank(),
+        axis.text = element_text(size = 6),
+        axis.text.x = element_text(margin = margin(t = 2, r = 0, b = 0, l = 0)),
+        axis.text.y = element_text(margin = margin(t = 0, r = -0, b = 0, l = 0)),
+        panel.grid = element_blank(),
+  ) -> g
+
+print(g)
+
+ggsave(plot = g, filename = paste0("../figures/fig2.pdf"),
+       width = 190, height = 190, units = "mm")
+
+```
+
+## **Figure 3**: classes of temporal trajectories across retreat
+
+```{r fig.height=3.5, fig.width=7.6}
+
+## Plot trajectories
+df.plot.traj %>% 
+  mutate(label = factor(label, levels = class.names)) %>% 
+  ggplot(aes(x = day, y = mean, ymin = `2.5%`, ymax = `97.5%`)) +
+  facet_wrap(. ~ label, nrow = 1, strip.position = "top", scales = "free_y") +
+  geom_ribbon(color = NA, fill = "grey70", linetype = 1, size = 0.1) + 
+  geom_line(color = "black") +
+  scale_x_continuous(name = "Retreat day",
+                     breaks = seq(1,10,1), expand = expansion(0,0)) +
+  scale_y_continuous(expand = expansion(0,0)) +
+  theme(panel.grid = element_blank(),
+        axis.title.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.y = element_blank(),
+        strip.clip = "off",
+        strip.text = element_text(size = 10),
+        panel.spacing.x = unit(5,"mm"),
+        plot.margin = margin(l=0)
+        ) -> g.gbmt.traj
+
+
+## Plot dimensions names
+df.plot.gbtm %>% 
+  group_by(class) %>% mutate(idx = dense_rank(idx)) %>% ungroup() %>%
+  select(class,idx,variable,label,domain) %>% 
+  distinct() %>% 
+  mutate(label = ifelse(variable %in% list.reverse, paste0(label, " (-)"), label)) %>%
+  mutate(domain = recode(domain, "Time orientation" = "Temporal\norientation")) %>% 
+  
+  ggplot(aes(x = 0, y = idx, color = domain)) +
+  facet_grid(~ class) +
+  geom_text(aes(label = label), x = -0.0, hjust = 0, vjust = 1, size = 3.2, 
+            family = "Ubuntu Condensed", key_glyph = "point") + 
+  scale_y_reverse() +
+  scale_color_manual(values = cols.domains) +
+  guides(colour = guide_legend(nrow = 2, byrow=T)) +
+  # guides()
+  theme(strip.text = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title = element_blank(),
+        panel.grid = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 8, vjust = 0.5, margin = margin(l=0,unit="mm")),
+        legend.position = "inside",
+        legend.justification = c(1, -0.0),
+        legend.direction = "horizontal",
+        # legend.key.size = unit(5,"mm"),
+        legend.key.spacing.x = unit(0,"mm"),
+        legend.key.spacing.y = unit(-1,"mm"),
+        legend.box.background = element_rect(color = "black"),
+  ) -> g.gbmt.dims
+
+## Combine
+(g.gbmt.traj + g.gbmt.dims + plot_layout(heights = c(1,3))) -> g
+g
+
+ggsave(plot = g, filename = "../figures/fig3.pdf",
+       width = 190, height = 90, units = "mm")
+
+```
+
+## **Figure 4**: times course within day
+
+```{r, fig.width=7.48, fig.height=6.5}
+
+set <- "time.fsfs"
+smooth.name <- "s(session, k = 8)"
+
+
+# Select smooth
+df.plot <- df.smooths[[set]] %>% 
+  filter(smooth == smooth.name)
+
+# Plot
+df.plot %>%
+
+  ggplot(aes(x = x, y = predicted, color = domain, fill = domain)) +
+  ggh4x::facet_grid2(idx ~ domain, scale = "free", independent = "all",
+                     axes = "all", remove_labels = "x", render_empty = FALSE,
+                     strip = ggh4x::strip_vanilla(clip = "off")) +
+  
+  # Smooths
+  # --- confidence bands
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), color = NA, alpha = 0.2) +
+  
+  # --- display even nearly significant smooths as continuous lines
+  geom_line(data = ~ left_join(., df.signif[[set]] %>% filter(smooth == smooth.name)) %>% filter(p < .10)) +
+  # geom_line() +
+  
+  # --- display non-nearly significant smooths as dashed
+  geom_line(data = ~ left_join(., df.signif[[set]] %>% filter(smooth == smooth.name)) %>% filter(p > .10), linetype = 2) +
+  
+  # --- fade non-fdr significant smooths
+  geom_rect(data = df.signif[[set]] %>% filter(smooth == smooth.name, p.corr > .05),
+            aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf), inherit.aes = FALSE,
+            colour = NA, fill = "white", alpha = .7) +
+  
+  # --- display variable name
+  geom_text(data = df.signif[[set]] %>% filter(smooth == smooth.name),
+            aes(x = mean(min(df.plot$x):max(df.plot$x)), y = Inf,
+                label = label, #paste0(label, ifelse(grepl("\n",label),"","\n"))# ifelse(sym == "n.s.",,paste0("\n","")))
+            ),
+            hjust = 0.5, vjust = -0.6, size = 3.2, family = "Ubuntu Condensed") +
+  
+  # --- frame facets in a box
+  geom_rect(data = ~ distinct(select(., label,domain,idx)), 
+            aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf), inherit.aes = FALSE,
+            colour = "black", fill = NA, size = 0.2) +
+  
+  
+  # Aethetics
+  scale_x_continuous(breaks = min(df.plot$x):max(df.plot$x),
+                     expand = expansion(0,0)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(3),
+                     expand = expansion(mult = c(0,0))) +
+  
+  ggh4x::facetted_pos_scales(
+    y = list(
+      
+      (domain == "Conative" & idx %in% c(1,3)) |
+        (domain == "Attentional" & idx %in% c(1,2)) ~
+        scale_y_continuous(breaks = scales::pretty_breaks(3),
+                           expand = expansion(mult = c(0, 0)),
+                           labels = scales::percent_format(scale = 1),
+        ),
+      (domain == "Temporal\norientation" & idx %in% c(1,3,4)) |
+        (domain == "Mental content" & idx %in% c(3,4)) |
+        (domain == "Affective" & idx %in% c(1,2)) ~
+        scale_y_continuous(breaks = scales::pretty_breaks(3),
+                           expand = expansion(mult = c(0,0)),
+                           labels = scales::percent_format(scale = 100)
+        ),
+      
+      (domain == "Temporal\norientation" & idx %in% c(2,5)) ~
+        scale_y_continuous(breaks = 2:5, labels = c("dy","wk","mo","yr"),
+                           expand = expansion(mult = c(0.1,0.1))
+        ),
+      
+      # --- "Future depth": force larger y span so that at least 2 breaks are visible 
+      (domain == "Temporal\norientation" & idx %in% c(5)) ~
+        scale_y_continuous(limits = c(1.9,3.1), breaks = 2:3, labels = c("dy","wk"),
+                           expand = expansion(mult = c(0.1,0.1)),
+        )
+    )
+  ) +
+  
+  scale_color_manual(values = cols.domains, aesthetics = c("color", "fill")) +
+  guides(color = "none", fill = "none") +
+  
+  coord_cartesian(clip = "off") +
+  labs(x = "Daily session index", y = "Rating") +
+  
+  theme_minimal() +
+  theme(panel.grid = element_blank(),
+        strip.text.x = element_text(size = 9.5, face = "bold", margin = margin(b=6, unit="mm")),
+        strip.text.y = element_blank(),
+        strip.clip = "off",
+        panel.spacing.y = unit(6, "mm"),
+        axis.title.y = element_blank(),
+        axis.text = element_text(size = 6),
+        axis.text.x = element_text(margin = margin(t = 2, r = 0, b = 0, l = 0)),
+        axis.text.y = element_text(margin = margin(t = 0, r = 0, b = 0, l = 0)),
+        axis.ticks.x = element_line(color = "black", linewidth = 0.2),
+        axis.ticks.length = unit(0.5, "mm"),
+        
+  ) -> g
+
+# Add meals to session plots
+if (grepl("session",smooth.name)) {
+  g <- g +
+    geom_text(data = bind_rows(
+      df.plot %>% select(domain,idx) %>% distinct() %>% mutate(text = "B", x = 1.5),
+      df.plot %>% select(domain,idx) %>% distinct() %>% mutate(text = "L", x = 4.5),
+      df.plot %>% select(domain,idx) %>% distinct() %>% mutate(text = "D", x = 7.5)
+    ),
+    aes(x = x, y = -Inf, label = text), inherit.aes = F,
+    hjust = 0.5, vjust = -0.5, size = 2.3)
+}
+
+print(g)
+
+ggsave(plot = g, filename = paste0("../figures/fig4.pdf"), 
+       width = 190, height = 165, units = "mm")
+
+```
+
+# Predictions of the phenomenological matrix of mindfulness
+
+## Prepare dataset
+
+```{r}
+
+## Dataset restricted to pure FA_bodily and OM sessions
+df.FAOM <- df %>% 
+  # --- add a column coding for practice family 
+  gather(family.name, family.weight, FA_bodily,OM) %>% 
+  relocate(starts_with("family."),-starts_with("family.grp"), .after=subject) %>% 
+  arrange(retreat,day,session,subject,family.name) %>% 
+  # --- keep only "pure" sessions
+  filter(family.weight == 1 & family.name %in% c("FA_bodily", "OM")) %>% 
+  # --- reverse some variables to match the original PMM
+  mutate(across(c("Aperture","Dereification1"), ~10-.)) %>%
+  # --- clean practice family names
+  mutate(family.name = map_chr(family.name, ~str_split(.,"_")[[1]][[1]]))
+
+df.FAOM %>% count(family.name, day) %>% arrange(day)
+
+df.model.FAOM <- df.FAOM %>% 
+  # --- summarise
+  group_by(family.name, subject) %>% 
+  summarise(across(all_of(list.vars.pmm), \(x) mean(x, na.rm = TRUE))) %>% 
+  ungroup() %>% 
+  # --- append expertise metadata
+  left_join(df.practice) %>% 
+  # --- append Age and Gender
+  left_join(df.quest1 %>% select(subject, age, genre)) %>% 
+  # --- wrangling
+  mutate(across(ends_with("Time"), ~./1000)) %>% 
+  mutate(nbYears = 2021 - startYear) %>% 
+  mutate(family.name = as.factor(family.name)) %>% 
+  set_variable_labels(family.name = "Practice style")
+
+# --- note: 5 participants have no pure OM sessions:
+setdiff(filter(df.model.FAOM, family.name=="FA")$subject,
+        filter(df.model.FAOM, family.name=="OM")$subject)
+  
+
+## Dataset rectricted to mindfulness meditation practices (all but movement and compassion)
+df.model.mindfulness <- df %>% 
+  # --- remove sessions that contained movement meditation
+  filter(MvtMedit == 0, Compassion == 0) %>% 
+  # --- summarise
+  group_by(subject) %>% 
+  summarise(across(all_of(list.vars.pmm), \(x) mean(x, na.rm = TRUE))) %>% 
+  ungroup() %>% 
+  # --- append expertise metadata
+  left_join(df.practice) %>% 
+  # --- append Age and Gender
+  left_join(df.quest1 %>% select(subject, age, genre)) %>% 
+  # --- wrangling
+  mutate(across(ends_with("Time"), ~./1000)) %>% 
+  mutate(nbYears = 2021 - startYear) %>% 
+  mutate(across(c("Aperture","Dereification1"), ~10-.))
+
+```
+
+## Statistical models
+
+```{r}
+
+## Fit model & extract output
+formula <- "~ age + family.name + totalTime + (1|subject)"
+m.FAOM <- list()
+df.p.FAOM <- tibble()
+for (dim in list.vars.pmm) {
+  m.FAOM[[dim]] <- lmer(data = df.model.FAOM, formula = paste0(dim, formula))
+  df.p.FAOM %<>% bind_rows(
+    summary(m.FAOM[[dim]])$coefficients %>% as.data.frame() %>% rownames_to_column("predictor") %>% mutate(dim = dim)
+  )
+}
+
+# Format output & correct for multiple comparison
+df.p.FAOM %<>% lmer_signif()
+
+sjPlot::tab_model(m.FAOM, dv.labels = paste(c("","- ","","","","- "), df.variables.labels[list.vars.pmm]),
+                  collapse.ci = TRUE, show.intercept = F, df.method = "kr", p.style = "numeric_stars",
+                  show.reflvl = TRUE, #prefix.labels = "varname",
+                  pred.labels = c("family.nameFA" = "Practice style: FA",
+                                  "family.nameOM" = "Practice style: OM (ref=FA)",
+                                  "totalTime" = "Accumulated lifetime practice",
+                                  "age" = "Age",
+                                  "family.nameOM:totalTime" = "Accumulated lifetime practice x Practice style"),
+                  wrap.labels = 25, use.viewer = F, file = "../figures/supptableS3.pdf")
+
+```
+
+## GBMT modeling
+
+### Model fitting
+
+```{r, fig.width=3, fig.height=3}
+
+# Prepare data
+df.data.gbmt.pmm <- df %>%
+  select(subject, day, all_of(list.vars.pmm)) %>% 
+  group_by(subject,day) %>% 
+  summarise_if(is.numeric, mean, na.rm=T) %>% 
+  as.data.frame()
+
+# Fit for different values of polynomial order (d) and cluster number (ng)
+m.gbmt.pmm <- list()
+for (d in 3:5) {
+  m.gbmt.pmm[[d]] <- gbmt.fit(df.data.gbmt.pmm, "subject", "day", list.vars.pmm,
+                              scaling = 0, d = d, ng.max = 8)
+}
+
+df.gbmt.pmm <- tibble()
+for (d in 3:5) {
+  df.gbmt.pmm %<>% bind_rows(m.gbmt.pmm[[d]]$ic %>% mutate(degree = d))
+}
+
+# Select winning model based on information criteria and parsimony
+d <- 3; ng <- 3; gbmt.winner <- m.gbmt.pmm[[d]]$models[[3]]
+
+df.pmm.class <- gbmt.winner$assign %>%
+  as.data.frame() %>% rownames_to_column() %>%
+  rename(class = ".", subject = rowname)
+
+df.pmm.class %>% count(class)
+
+# Quick visualization
+for (vv in list.vars.pmm) {
+  plot(gbmt.winner, x.names = vv)
+}
+
+```
+
+### **Supplementary figure S3**: information criteria of GBMT models
+
+```{r, fig.width=7.48, fig.height=2.4}
+
+# Plot information criteria as a function of number of classes & polynomial order
+g <- gbmt.plot(df.gbmt.pmm)
+g
+
+# Save
+ggsave(plot = g, filename = "../figures/suppfig3.pdf", dpi = 300,
+       width = 190, height = 60, units = "mm")
+ggsave(plot = g, filename = "../figures/suppfig3.png", dpi = 600,
+       width = 190, height = 60, units = "mm")
+
+# struggling group: S01, S04 and S05 from wave #1 / S28 from wave #2 / S54 from wave #3
+
+```
+
+### Prepare plotting dataset
+
+```{r}
+
+class.order <- c(2,3,1)
+
+# Get class assignment & reorder it so that first class = "high-achievers"
+df.plot.n <- df.pmm.class %>% 
+  count(class) %>% rowwise() %>% 
+  mutate(class = which(class.order==class))
+df.plot.n
+  
+# Generate model-derived data for each class
+df.plot.matrix <- data.frame()
+for (cc.new in (1:ng)) {
+  cc <- class.order[cc.new]
+  # print(cc)
+  for (vv in list.vars.pmm) {
+    df.plot.matrix <- bind_rows(
+    df.plot.matrix,
+    predict(m.gbmt.pmm[[d]]$model[[ng]])[[cc]][[vv]] %>%
+      as.data.frame() %>%
+      rownames_to_column("day") %>% mutate(day = as.numeric(day)) %>% 
+      mutate(class = cc.new,
+             variable = vv)
+  )  
+  }
+}
+
+# --- add cluster size to cluster data
+df.plot.matrix <- df.plot.matrix %>% 
+  left_join(df.plot.n) %>% 
+  
+# --- revert the Aperture dimension for correct interpretation, and the Subjective realism dimension to Dereification
+  mutate(across(c(mean,`2.5%`,`97.5%`),
+                ~map2_dbl(variable,., ~(ifelse(.x %in% c("Aperture","Dereification1"), 10-.y, .y))))) %>% 
+
+# --- name clusters with letters rather numbers (facilitates plotting and the like)
+  mutate(class = LETTERS[class])
+
+```
+
+### Classes' meditation experience
+
+```{r}
+df.pmm.class %>% count(class)
+
+df.pmm.xp <- df.pmm.class %>% 
+  left_join(df.practice)
+
+df.pmm.xp %>% group_by(class==2) %>% summarise_if(is.double, mean)
+df.pmm.xp %>% group_by(class==2) %>% summarise_if(is.double, sd)
+
+wilcox.test(totalTime ~ class==2, data = df.pmm.xp) # yes
+wilcox.test(retreatTime ~ class==2, data = df.pmm.xp) # no
+wilcox.test(practiceTime ~ class==2, data = df.pmm.xp) # yes
+wilcox.test(usualRetreatDuration ~ class==2, data = df.pmm.xp) # no
+wilcox.test(usualRetreatPractice ~ class==2, data = df.pmm.xp) # no
+wilcox.test(currentDailyPractice ~ class==2, data = df.pmm.xp) # no
+
+```
+
+## **Figure 5**: predictions of the PMM
+
+### Subplot: state effect
+
+```{r, fig.height=1.5, fig.width=7.48}
+
+## Calculate Cohen's d for states
+# Note: this does not control for expertise, and thus may be an underestimation for phenomenological dimensions that are sensitive to expertise.
+
+df.plot.FAOM <- df.model.FAOM %>%
+  select(subject, family.name, all_of(list.vars.pmm)) %>%
+  gather(dim, value, all_of(list.vars.pmm))
+  
+df.plot.FAOM.cohend <- df.plot.FAOM %>% 
+  spread(family.name, value) %>% 
+  drop_na() %>%
+  mutate(diff = OM-FA) %>% 
+  group_by(dim) %>% 
+  summarise(d = (mean(OM)-mean(FA))/sd(diff))
+
+## PLOT
+df.plot.FAOM %>% 
+  ggplot(aes(x = family.name, y = value, shape = family.name)) +
+  facet_wrap(~ factor(dim, levels = list.vars.pmm), nrow = 1, scales = "free_y",
+             labeller = as_labeller(labels.pmm)) +
+  # --- summary statistics
+  stat_summary(geom = "errorbar", size = 0.5, width = 0.15,
+               fun.data = mean_cl_normal) +
+  stat_summary(geom = "point", size = 3, 
+               fun.y = mean) +
+  # --- Cohen's d
+  geom_text(data = df.plot.FAOM.cohend,
+            aes(label = paste0("d = ",round(d,2))), inherit.aes = F,
+            x = 1.5, y = Inf, hjust = 0.5, vjust = 1, size = 3, color = "grey30") +
+  
+  geom_text(data = df.p.FAOM %>% filter(predictor=="family.nameOM"),
+            aes(label = ifelse(signif=="n.s.", "", paste(signif))), inherit.aes = F,
+            x = 1.5, y = Inf, hjust = 0.5, vjust = 2.5, size = 4, color = "black") +
+  
+  scale_x_discrete(labels = c("FA\n(days 1-5)", "OM\n(days 6-10)"),
+                   expand = expansion(mult=c(0.3,0.3))) +
+  scale_y_continuous(breaks = scales::pretty_breaks(4),
+                     expand = expansion(mult=c(0.1,0.3))) +
+  scale_shape_manual(values = list(FA=18, OM=20)) +
+  guides(shape = "none") +
+  coord_cartesian(clip = "off") +
+  theme(strip.text = element_text(family = "Ubuntu Condensed", size = 10),
+        panel.spacing.x = unit(5,"mm"),
+        axis.title = element_blank(),
+        panel.grid.major.x = element_blank()) -> g.pmm.state
+
+g.pmm.state
+
+```
+
+### Subplot: expertise effect
+
+```{r, fig.height=1.5, fig.width=7.48}
+
+## Prepare data
+df.plot <- df.model.mindfulness %>% 
+  gather(dim, value, all_of(list.vars.pmm)) %>% 
+  mutate(dim = factor(dim, levels = list.vars.pmm))
+
+dims.signif <- (df.p.FAOM %>% filter(predictor=="totalTime") %>% filter(p < .05))$dim
+  
+## PLOT
+df.plot %>% 
+  select(subject, dim, value, totalTime) %>%
+  group_by(subject, dim) %>% summarise_if(is.double, mean) %>% drop_na() %>% 
+
+  ggplot(aes(x = (totalTime), y = value)) +
+  facet_wrap(~ factor(dim, levels = list.vars.pmm),
+             nrow = 1, scales = "free", labeller = as_labeller(labels.pmm)) +
+  
+  # --- trend: whole sample
+  geom_smooth(method = "lm", color = "grey30", fill = "grey30") +
+  
+  # --- individual data points: the crowd
+  geom_point(data = . %>% filter(totalTime < 6),
+             alpha = 1, size = 1.3, color = "skyblue1", shape = 16) +
+  
+  # --- individual data points: experienced
+  geom_point(data = . %>% filter(totalTime > 6),
+             alpha = 1, size = 1.3, color = "sienna1", shape = 16) +
+  
+  # --- trend: excluding outliers
+  geom_smooth(data = . %>% filter(totalTime < 6) %>% filter(dim %in% dims.signif),
+              method = "lm", color = "skyblue1", fill = "dodgerblue4",
+              fullrange = FALSE, size = 0.8) +
+  geom_smooth(data = . %>% filter(totalTime < 6) %>% filter(dim %in% dims.signif),
+              method = "lm", color = "skyblue1", fill = NA,
+              fullrange = TRUE, se = FALSE, linetype = 2, size = 0.8) +
+  
+  # --- significance
+  geom_text(data = df.p.FAOM %>% filter(predictor=="totalTime"),
+            aes(label = ifelse(signif=="n.s.", "", paste(signif))), inherit.aes = F,
+            x = 5, y = Inf, hjust = 0.5, vjust = 1.5, size = 4) +
+  
+  # --- aesthetics
+  scale_x_continuous(name = "Lifetime practice (thousands of hours)",
+                     breaks = seq(0,10,2),
+                     expand = expansion(mult = c(0.05,0.05))) +
+  coord_cartesian(clip = "off") +
+  theme(strip.text = element_text(family = "Ubuntu Condensed", size = 10),
+        axis.title.y = element_blank(),
+        panel.grid = element_blank(),
+        axis.line = element_line(color = "grey20")) -> g.pmm.xp
+  
+g.pmm.xp
+
+```
+
+### Subplot: pheno matrices
+
+```{r, fig.height=7, fig.width=7.5}
+
+df.practice %>% count(totalTime > 2000)
+
+# Prepare dataframe for pheno matrixplot of FA vs. OM
+df.plot.pheno.FAOM <- df.plot.FAOM %>% 
+  mutate(family.name = case_match(family.name, "FA" ~ "FA (bodily)\n(days 1-5)", "OM" ~ "OM\n(days 6-10)")) %>% #recode_factor()
+  group_by(subject, family.name, dim) %>% 
+  summarise(value = mean(value, na.rm=T)) %>% 
+  group_by(family.name, dim) %>% 
+  summarise(value = mean(value, na.rm=T)) %>% 
+  spread(dim,value) %>% 
+  mutate(plot.type = "Effect of state") %>% 
+  rename(label = family.name)
+
+# Prepare dataframe for pheno matrixplot of subgroups of expertise
+df.plot.pheno.xp <- df %>% 
+  filter(MvtMedit == 0, Compassion == 0) %>% 
+  # --- segment time in 3-day segments
+  filter(day < 10) %>% mutate(day3 = case_match(day, 1:3 ~ "days 1-3", 4:6 ~ "days 4-6", 7:9 ~ "days 7-9")) %>% 
+  # --- summarise
+  group_by(subject, day3) %>% 
+  summarise(across(all_of(list.vars.pmm), mean, na.rm=T)) %>% 
+  ungroup() %>% 
+  # --- append expertise metadata
+  left_join(df.practice) %>% 
+  # --- wrangling
+  mutate(across(c("Aperture","Dereification1"), ~10-.)) %>% 
+  gather(dim, value, all_of(list.vars.pmm)) %>% 
+  mutate(dim = factor(dim, levels = list.vars.pmm)) %>% 
+  # --- create subgroups based on expertise
+  mutate(subgroup = cut(totalTime, breaks = c(0,2000))) %>% 
+  # --- cluster days by 3, excluding the last one
+  group_by(subgroup, day3, dim) %>% summarise(mean = mean(value, na.rm=T)) %>% 
+  spread(dim, mean) %>% 
+  mutate(plot.type = "Effect of expertise") %>% 
+  rename(label = day3)
+df.plot.pheno.xp
+  
+bind_rows(df.plot.pheno.FAOM, df.plot.pheno.xp) %>% 
+  mutate(plot.type = factor(plot.type, levels = c("Effect of state", "Effect of expertise"))) %>% 
+  ggplot(aes(x = Dereification1, y = MetaAwareness)) +
+  facet_wrap(~ factor(plot.type)) +
+  geom_point(aes(alpha = MentalEffort),
+             size = 7, stroke = 1, color = "black", shape = 5) +
+  geom_point(aes(size = Aperture, color = Stability, fill = Vividness),
+             shape = 21, stroke = 1.3) +
+  expand_limits(x = c(5.8,7.8), y = c(5.8,7.8)) +
+  
+  # --- labels
+  ggrepel::geom_text_repel(aes(label = label),
+                            size = 2.3, point.size = 8, nudge_y = -0., box.padding = 0.40,
+                            min.segment.length = 10000, direction = "y", seed = 24) +
+  geom_label(data = tibble(label = c("< 2,000 hrs\nn=41","> 2,000 hrs\nn=12"),
+                           plot.type = "Effect of expertise"),
+             aes(label = label), x = c(6.5,7.4), y = c(6.3,7.1), size = 3) +
+  
+  # --- aesthetics
+  scale_size_binned(range = c(0.1,5.5), breaks = c(5,5.5,6), limits = c(4.5,6.5)) +
+  scale_fill_steps(low = "turquoise4", high = "lightcyan1", breaks = c(6,6.5,7,7.5), limits = c(6,7.5)) +
+  scale_colour_steps(low = "brown1", high = "darkred", breaks = c(64,68,72,76), limits = c(64,76), labels = scales::label_percent(scale=1)) +
+  scale_alpha_binned(range = c(0.1,1), breaks = c(3.5,4,4.5,5), limits = c(3,5)) +
+  
+  # guides(size = guide_legend(order = 1, reverse = T),
+  #        fill = guide_colourbar(order = 2, barheight = 1.5, barwidth = 0.5),
+  #        color = guide_colourbar(order = 3, barheight = 1.5, barwidth = 0.5),
+  #        alpha = guide_legend(order = 4, reverse = T, override.aes = list(size = 2), byrow = F)) +
+  
+  guides(size = guide_legend(order = 1, label.position = "bottom"),
+         fill = guide_colourbar(order = 2, barheight = 0.7, barwidth = 5),
+         color = guide_legend(order = 3, label.position = "bottom"),
+         alpha = guide_legend(order = 4, label.position = "bottom",
+                              override.aes = list(size = 2))) +
+  
+  labs(x = "Dereification (- subjective realism)", y = "Meta-awareness", fill = "Clarity", alpha = "Effort") +
+  coord_fixed() +
+  theme(panel.border = element_rect(fill=NA),
+        panel.spacing.x = unit(5,"mm"),
+        strip.text = element_text(size = 10),
+        legend.title = element_text(family = "Ubuntu Condensed", size = 10),
+        axis.title = element_text(family = "Ubuntu Condensed", size = 10)) -> g.pmm.matrices
+
+g.pmm.matrices
+
+```
+
+### Subplot: GBMT classes
+
+```{r fig.height=1.8, fig.width=7.48}
+
+## Plot timecourses of each class and dimension
+df.plot.matrix %>% 
+  
+  # --- mapping
+  ggplot(aes(x = day, y = mean, ymin = `2.5%`, ymax = `97.5%`, color = class, fill = class)) +
+  
+  # --- facets
+  facet_wrap(. ~ factor(variable, levels = list.vars.pmm),
+             nrow = 1, scales = "free_y", labeller = as_labeller(labels.pmm)) +
+  
+  # --- mean values
+  geom_line(size = 0.8) +
+  # --- confidence intervals
+  geom_ribbon(fill = NA, linetype = 2) +
+  
+  # --- scales
+  scale_x_continuous(breaks = seq(1,9,2), expand = expansion(mult = c(0,0))) +
+  scale_y_continuous(breaks = scales::pretty_breaks(5)) +
+  scale_color_manual(name = "cluster", values = cols.clusters) +
+  guides(color = "none") +
+  
+  # --- other aesthetics
+  labs(x = "Retreat day") +
+  coord_cartesian(clip = "off") +
+  theme(legend.box.spacing = unit(2,"mm"), 
+        strip.text = element_text(family = "Ubuntu Condensed", size = 10),
+        panel.grid = element_blank(),
+        panel.spacing.y = unit(6,"mm"),
+        # legend.position = "bottom",
+        axis.title.y = element_blank()) -> g.pmm.gbmt
+
+g.pmm.gbmt
+
+
+## Pie displaying class prevalence
+# --- calculate prevalence & builds labels
+df.pie <- df.pmm.class %>%
+  mutate(class = c("C","A","B")[class]) %>% count(class) %>% 
+  mutate(labels = paste0(n, "/", sum(n), "\n(", round(100*n/sum(n)), "%)"))
+
+# --- plot
+g.pmm.gbmt.pie <- ggpubr::ggpie(df.pie,
+              x = "n", label = "labels",
+   lab.pos = "out", lab.font = c(3,"plain","black"),
+   fill = "class", color = "white",
+   palette = cols.clusters[c(1,3,2)]) +
+  guides(fill = "none")
+
+g.pmm.gbmt.pie
+
+```
+
+### Assemble subplots
+
+```{r, fig.height=8, fig.width=7.5}
+
+# --- predictions
+(
+  (g.pmm.state + labs(title = "Effect of practice style on the dimensions of the PMM")) /
+  (g.pmm.xp + labs(title = "Effect of lifetime practice on the dimensions of the PMM")) /
+   
+# --- pheno matrix representation
+(g.pmm.matrices + labs(title = "Representation in the multidimensional phenomenological space of Lutz et al. (2015)") +
+   guide_area() + 
+   plot_layout(widths = c(6,1), guides = "collect") &
+   theme(legend.box.margin = margin(0),
+         legend.direction = "horizontal",
+         legend.title.position = "top",
+         legend.title = element_text(hjust = 0, margin = margin(t=-2, b=1, unit="mm")),
+         legend.text = element_text(margin = margin(t=1,unit="mm")))
+) /
+
+# --- GBMT classes
+(g.pmm.gbmt + labs(title = "Subgroups defined by distinct temporal trajectories of PMM dimensions") + 
+   (g.pmm.gbmt.pie + 
+      plot_layout(tag_level = 'new') + 
+      theme(plot.background = element_blank(),
+            plot.margin = margin(-10, unit="mm"))) +
+  plot_layout(widths = c(6,1)))
+) +
+
+# --- aesthetics
+plot_annotation(tag_levels = "A") +
+plot_layout(heights = c(1,1,4,1.2)) &
+
+theme(plot.tag.position = c(0.03, 1.01),
+      plot.tag = element_text(face = "bold", size = 12, hjust = 1, vjust = 1, margin = margin(t=7)),
+      plot.title = element_text(face = "bold", margin = margin(t=7,b=3)),
+      legend.box.spacing = unit(0, "mm"),
+      legend.spacing = unit(2,"mm"),
+      legend.key.spacing.y = unit(-2, "mm")) -> g
+
+g
+
+ggsave(g, filename = "../figures/fig5.pdf",
+       width = 190, height = 230, units = "mm")
+# ggsave(g, filename = "../figures/fig5.png",
+#        dpi = 300, width = 190, height = 220, units = "mm")
+```
+
+# Pain sensory-affective uncoupling
+
+All analyses of this section are performed on sessions where some pain has been reported (pain intensity \> 0).
+
+## Time course
+
+### GAMM modeling
+
+```{r}
+
+## Raw ratings
+formula <- "~ s(day) + s(session, k=8) + s(day, subject, bs='fs', m=1) + s(session, subject, bs='fs', k=8, m=1)"
+
+tic()
+m.pain[["time.fsfs"]] <- gam_fit(df %>% filter(PainIntensity > 0),
+                                 formula,
+                                 list.vars = list.vars.pain, 
+                                 fun = bam, 
+                                 method = "fREML", discrete = T,
+                                 print.var = TRUE)
+summary(m.pain[["time.fsfs"]]$PainIntensity)
+summary(m.pain[["time.fsfs"]]$PainUnpleasantness)
+toc() # ~15s
+
+
+## Orthogonalized ratings
+tic()
+m.tmp <- gam_fit(df %>% filter(PainIntensity > 0),
+                 formula = "~ PainUnpleasantness + s(day) + s(session, k=8) + s(subject, PainUnpleasantness, bs='re') + s(day, subject, bs='fs', m=1) + s(session, subject, bs='fs', k=8, m=1)",
+                 list.vars = "PainIntensity", 
+                 fun = bam, 
+                 method = "fREML", discrete = T,
+                 print.var = TRUE)
+m.pain[["time.fsfs.ortho"]]$PainIntensity <- m.tmp$PainIntensity
+summary(m.pain[["time.fsfs.ortho"]]$PainIntensity)
+
+m.tmp <- gam_fit(df %>% filter(PainIntensity > 0),
+                 formula = "~ PainIntensity + s(day) + s(session, k=8) + s(subject, PainIntensity, bs='re') + s(day, subject, bs='fs', m=1) + s(session, subject, bs='fs', k=8, m=1)",
+                 list.vars = "PainUnpleasantness", 
+                 fun = bam, 
+                 method = "fREML", discrete = T,
+                 print.var = TRUE)
+m.pain[["time.fsfs.ortho"]]$PainUnpleasantness <- m.tmp$PainUnpleasantness
+summary(m.pain[["time.fsfs.ortho"]]$PainUnpleasantness)
+
+toc() # ~10s
+
+```
+
+### Plot
+
+```{r, fig.width=3, fig.height = 1.5}
+
+## Prepare datasets for raw ratings
+set <- "time.fsfs"
+# --- extract model predictions 
+df.emmeans <- tibble()
+for (vv in list.vars.pain) {
+  df.emmeans %<>% bind_rows(
+    ggemmeans(m.pain[[set]][[vv]], terms = list(day = seq(1,10,.1)), infer = c(T,T)) %>% as_tibble() %>% 
+      mutate(var = vv)
+  )
+}
+# --- extract by-day significance of uncoupling
+df.emmeans.p <- emmeans(m.pain[[set]][["PainUncoupling"]], ~ 1|day, infer= c(T,T), at=list(day = 1:10)) %>%
+  as.tibble %>% mutate(sym = p.to.sym(p.value))
+
+
+## Prepare datasets for orthogonalized ratings
+set <- "time.fsfs.ortho"
+# --- extract model predictions 
+df.emmeans.ortho <- tibble()
+for (vv in c("PainIntensity","PainUnpleasantness")) {
+  df.emmeans.ortho %<>% bind_rows(
+    ggemmeans(m.pain[[set]][[vv]], terms = list(day = seq(1,10,.1)), infer = c(T,T)) %>% as_tibble() %>% 
+      mutate(var = vv)
+  )
+}
+# # --- extract by-day significance of uncoupling
+# df.emmeans.ortho.p <- emmeans(m.pain[[set]][["PainUncoupling"]], ~ 1|day, infer= c(T,T), at=list(day = 1:10)) %>%
+#   as.tibble %>% mutate(sym = p.to.sym(p.value))
+# 
+# 
+# 
+# ## PLOT
+# # --- pain intensity & unpleasantness
+# df.emmeans %>% filter(var != "PainUncoupling") %>% 
+#   ggplot(aes(x = x, y = predicted)) +
+#   geom_ribbon(aes(ymin = conf.low, ymax = conf.high, fill = var), alpha = .2) +
+#   geom_line(aes(color = var)) +
+#   geom_text(data = tibble(var = c("PainIntensity*","PainUnpleasantness***"), predicted = c(Inf,-Inf)),
+#             aes(x = Inf, label = str_replace(var, "Pain", "Pain "), color = str_replace(var,"\\*+","")), hjust = 1, vjust = c(1,-1), size = 2.5) +
+#   scale_x_continuous(breaks = 1:10,
+#                      expand = expansion(0,0)) +
+#   scale_y_continuous(breaks = scales::pretty_breaks(6),
+#                      expand = expansion(0,0)) +
+#   scale_color_manual(values = c("PainIntensity" = cols.domains[["Somatic"]], "PainUnpleasantness" = cols.domains[["Affective"]]),
+#                      aesthetics = c("color","fill"), guide = "none") +
+#   expand_limits(y = c(0,30)) +
+#   labs(x = "day", y = "Rating (0-100)") +
+#   theme(panel.grid.minor.x = element_blank()) -> g.pain.int.unpl
+# 
+# 
+# # --- orthogonalized pain intensity & unpleasantness
+# df.emmeans.ortho %>% 
+#   ggplot(aes(x = x, y = predicted)) +
+#   geom_ribbon(aes(ymin = conf.low, ymax = conf.high, fill = var), alpha = .2) +
+#   geom_line(aes(color = var)) +
+#   geom_text(data = tibble(var = c("PainIntensity","PainUnpleasantness***"), predicted = c(Inf,-Inf)),
+#             aes(x = Inf, label = str_replace(var, "Pain", "Pain "), color = str_replace(var,"\\*+","")), hjust = 1, vjust = c(1,-1), size = 2.5) +
+#   scale_x_continuous(breaks = 1:10,
+#                      expand = expansion(0,0)) +
+#   scale_y_continuous(breaks = scales::pretty_breaks(6),
+#                      expand = expansion(0,0)) +
+#   scale_color_manual(values = c("PainIntensity" = cols.domains[["Somatic"]], "PainUnpleasantness" = cols.domains[["Affective"]]),
+#                      aesthetics = c("color","fill"), guide = "none") +
+#   expand_limits(y = c(0,30)) +
+#   labs(x = "Retreat day", y = "Rating (0-100)") +
+#   theme(panel.grid.minor.x = element_blank()) -> g.pain.int.unpl.ortho
+# 
+# # --- pain uncoupling
+# df.emmeans.p %>% 
+#   ggplot(aes(x = day, y = emmean)) +
+#   geom_hline(yintercept = 0, color = "grey50") +
+#   geom_ribbon(aes(ymin = lower.CL, ymax = upper.CL),  fill = cols.domains[["Meta-cognitive"]], alpha = .2) +
+#   geom_line(color = cols.domains[["Meta-cognitive"]]) +
+#   geom_text(data = tibble(var = c("PainUncoupling"), emmean = 0),
+#             aes(x = 10, label = str_replace(var, "Pain", "Pain ")),
+#             color = cols.domains[["Meta-cognitive"]], hjust = 1, vjust = -1, size = 2.5) +
+#   geom_text(aes(y = upper.CL, label = ifelse(sym=="n.s.","",paste(sym))), vjust = -0, size = 2.5) +
+#   scale_x_continuous(breaks = 1:10, expand = expansion(0,0)) +
+#   scale_y_continuous(breaks = scales::pretty_breaks(6), expand = expansion(0,0)) +
+#   expand_limits(x = c(0.7,10.3), y = c(0,9.5)) +
+#   coord_cartesian(clip = "off") +
+#   labs(x = "day", y = "Pain uncoupling") +
+#   theme(panel.grid.minor.x = element_blank()) -> g.pain.uncpl
+# 
+# # --- combine
+# g.pain.int.unpl + (g.pain.int.unpl.ortho + theme(axis.title.y = element_blank()))
+
+
+
+bind_rows(df.emmeans %>% mutate(type = "Raw scales") %>% filter(var != "PainUncoupling"),
+          df.emmeans.ortho %>% mutate(type = "Orthogonalized scales")) %>% 
+  ggplot(aes(x = x, y = predicted)) +
+  facet_wrap(~ fct_rev(as.factor(type))) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high, fill = var), alpha = .2) +
+  geom_line(aes(color = var)) +
+  geom_text(data = tibble(var = c("PainIntensity*","PainUnpleasantness***","PainIntensity","PainUnpleasantness***"),
+                          type = c(rep("Raw scales",2), rep("Orthogonalized scales",2)),
+                          predicted = c(Inf,-Inf,Inf,-Inf)),
+            aes(x = Inf, label = str_replace(var, "Pain", "Pain "), color = str_replace(var,"\\*+","")),
+            hjust = 1, vjust = c(2,-1,2,-1), size = 2.5) +
+  scale_x_continuous(breaks = 1:10,
+                     expand = expansion(0,0)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(6),
+                     expand = expansion(0,0)) +
+  scale_color_manual(values = c("PainIntensity" = cols.domains[["Somatic"]], "PainUnpleasantness" = cols.domains[["Affective"]]),
+                     aesthetics = c("color","fill"), guide = "none") +
+  expand_limits(y = c(0,32.5)) +
+  labs(x = "Retreat day", y = "Rating (0-100)") +
+  theme(panel.grid.minor.x = element_blank(),
+        panel.spacing.x = unit(4,"mm")) -> g.pain.int.unpl.both
+
+g.pain.int.unpl.both
+```
+
+## Correlations with traits
+
+### Calculate
+
+```{r}
+
+## Prepare data
+df.model <- df %>% filter(PainIntensity > 0) %>%  
+  # --- retreat-average by subject
+  group_by(subject) %>% summarise(across(starts_with("Pain"), ~mean(., na.rm = T))) %>% ungroup() %>% 
+  # --- append questionnaire scores
+  left_join(df.quest1)
+
+
+## Calculate correlations
+partial <- T
+ranktransform <- T
+p_adjust <- "none"
+
+df.pain.trait.corr <- tibble()
+df.pain.trait.corr %<>% bind_rows(
+  df.model %>% 
+    correlation(select = "DDS", select2 = c("PainIntensity","PainUnpleasantness"),
+                partial = partial, ranktransform = ranktransform, p_adjust = p_adjust) %>% 
+    as.tibble() %>% mutate(type = "full"),
+  
+  df.model %>% 
+    correlation(select = "DDS", select2 = c("PainUncoupling"),
+                partial = partial, ranktransform = ranktransform, p_adjust = p_adjust) %>% 
+    as.tibble() %>% mutate(type = "full"),
+  
+  df.model %>% 
+    correlation(select = "DDS", select2 = c("PainIntensity","PainUnpleasantness","PCS"),
+                partial = partial, ranktransform = ranktransform, p_adjust = p_adjust) %>% 
+    as.tibble() %>% mutate(type = "partial"),
+  
+  df.model %>% 
+    correlation(select = "DDS", select2 = c("PainUncoupling","PCS"),
+                partial = partial, ranktransform = ranktransform, p_adjust = p_adjust) %>% 
+    as.tibble() %>% mutate(type = "partial"),
+  
+  df.model %>% 
+    correlation(select = "PCS", select2 = c("PainIntensity","PainUnpleasantness"),
+                partial = partial, ranktransform = ranktransform, p_adjust = p_adjust) %>% 
+    as.tibble() %>% mutate(type = "full"),
+  
+  df.model %>% 
+    correlation(select = "PCS", select2 = c("PainUncoupling"),
+                partial = partial, ranktransform = ranktransform, p_adjust = p_adjust) %>% 
+    as.tibble() %>% mutate(type = "full"),
+  
+  df.model %>% 
+    correlation(select = "PCS", select2 = c("PainIntensity","PainUnpleasantness","DDS"),
+                partial = partial, ranktransform = ranktransform, p_adjust = p_adjust) %>% 
+    as.tibble() %>% mutate(type = "partial"),
+  
+  df.model %>% 
+    correlation(select = "PCS", select2 = c("PainUncoupling","DDS"),
+                partial = partial, ranktransform = ranktransform, p_adjust = p_adjust) %>% 
+    as.tibble() %>% mutate(type = "partial")
+) %>% 
+  
+  # --- remove rows and columns that are not of interest
+  filter(grepl("Pain",Parameter2)) %>% 
+  select(-c(t,df_error,Method,n_Obs))
+
+
+```
+
+### **Supplementary table S4**
+
+```{r}
+
+df.pain.trait.corr %>% 
+  # --- add a covariate column
+  mutate(Covariates = case_match(Parameter2,
+                                 "PainIntensity" ~ "pain unpleasantness",
+                                 "PainUnpleasantness" ~ "pain intensity",
+                                 "PainUncoupling" ~ ""),
+         .before = r) %>% 
+  mutate(Covariates = paste0(Covariates, case_when(type=="partial" & Covariates != "" ~ case_match(Parameter1, "DDS" ~ ", PCS", "PCS" ~ ", DDS"),
+                                                   type=="partial" & Covariates == "" ~ case_match(Parameter1, "DDS" ~ "PCS", "PCS" ~ "DDS"),
+                                                   .default = ""))) %>% 
+  # --- add a significance column
+  mutate(significance = p.to.sym(p)) %>% 
+  # --- trim to 3 decimals
+  mutate_if(is.double, round, 3) %>%
+  # --- merge CI columns
+  mutate(`95% CI` = paste0("[", CI_low, ", ", CI_high, "]"),
+         .keep = "unused", .after = r) %>% 
+  # --- give explicit names to columns
+  rename(Questionnaire = Parameter1,
+         "Pain scale" =  Parameter2,
+         "p-value" = p) %>% 
+    select(-c(CI,type)) %>% 
+  
+  gt() %>% 
+  cols_align(align = "left", columns = significance) %>% 
+  gtsave(filename = "../figures/supptableS4.html")
+
+```
+
+### Plot
+
+Replicates figure 1 of Zorn et al. 2021.
+
+```{r, fig.width=2.74, fig.height = 2}
+
+## Prepare plotting dataframe
+df.plot <- df.pain.trait.corr %>% 
+  filter(Parameter2 != "PainUncoupling") %>% 
+  # --- keep only necessary columns
+  select(Parameter1, Parameter2, r, p, type) %>% 
+  # --- significance label
+  mutate(sym = p.to.sym(p),
+         label = paste0(round(r,2), ifelse(sym=="n.s.","",as.character(sym)))) %>% 
+  select(-p,-sym) %>% 
+  # --- calculate average of full & partial correlation, to map on edge width
+  group_by(Parameter1,Parameter2) %>% mutate(r = mean(r)) %>% ungroup %>% 
+  # --- correlation label
+  spread(type,label) %>% 
+  mutate(stats = paste0(full, "\n(", partial, ")"),
+         .keep = "unused") %>% 
+  rename(variable = Parameter2) %>% 
+  # --- add variable metadata
+  add_info
+
+
+## Plot
+df.plot %>% 
+  ggplot(aes(x = Parameter1, y = 0)) +
+  facet_wrap(~ label) +
+  geom_segment(aes(linewidth = abs(r), xend = 1.5, y = 0, yend = Inf),
+               lineend = "butt") +
+  geom_label(aes(label = Parameter1),
+             size = 3, label.r = unit(1, "lines"), label.padding = unit(0.8, "lines")) +
+  geom_text(aes(label = str_replace_all(stats,"0\\.","\\."), y = 0.5),
+            vjust = 0, size = 2.5) +
+  # scale_x_discrete(expand = expansion(mult=c(0.35,0.35))) +
+  scale_x_discrete(expand = expansion(add=c(0.2,0.2))) +
+  scale_y_continuous(expand = expansion(add=c(0,0.4))) +
+  scale_linewidth_continuous(range = c(0.5,2), guide = "none") +
+  coord_equal(clip = "off") +
+  # expand_limits(y = 1) +
+  theme_void() +
+  theme(#plot.background = element_rect(fill = "yellow"),
+        panel.spacing.x = unit(15,"mm"),
+        # strip.background.x = element_rect(fill = NA, color = "black"),
+        strip.text.x = element_text(margin = margin(t=3, b=3, unit="mm"))) -> g.pain.corr.quest
+
+g.pain.corr.quest
+
+```
+
+## Correlations with pheno dimensions
+
+### Functions
+
+**Note:** due to a bug in `{correlation}` (https://github.com/easystats/correlation/issues/290), zero-order multilevel correlations are not reliable when multiple variables are included, so we should calculate correlations separately, one by one.
+
+Let's create a function for that:
+
+```{r}
+
+correlation.multi.0 <- function(data, within = "subject", target = "PainUncoupling", vars = vars, covars = c(), ranktransform = T, multilevel = T, bayesian = F) {
+  
+  # --- if covariates are provided, make sure partialization is enabled
+  partial <- ifelse(is_empty(covars), FALSE, TRUE)
+  
+  # --- initialize output dataframe
+  df.corr.out <- tibble()
+  
+  # --- calculate correlations one by one
+  for (vv in vars) {
+    df.corr.out %<>% bind_rows(
+      correlation(data = data %>% 
+                    select(all_of(within), target, all_of(covars), vv) %>%
+                    mutate_if(is.logical, as.numeric),
+                  ranktransform = ranktransform,
+                  multilevel = multilevel,
+                  partial = partial,
+                  bayesian = bayesian,
+                  bayesian_prior = "medium.narrow") %>% 
+        as.tibble %>% 
+        filter(!(Parameter1 %in% covars), !(Parameter2 %in% covars))
+    )
+  }
+  
+  # --- prune columns & correct for multiple comparisons
+  df.corr.out %>% 
+    select(-df_error,-t,-Method) %>% 
+    arrange(desc(abs(r))) %>% 
+    mutate(p.BH = p.adjust(p, method = "BH")) %>% 
+    mutate(p.holm = p.adjust(p, method = "holm"))
+}
+
+
+correlation.multi.partial <- function(data, within = "subject", target = "PainUncoupling", vars = vars, ranktransform = T, multilevel = T, bayesian = F) {
+
+correlation(data = data %>% select(within, target, all_of(vars)) %>% mutate_if(is.logical, as.numeric),
+            ranktransform = ranktransform,
+            multilevel = multilevel,
+            partial = T,
+            p_adjust = "none",
+            bayesian = bayesian,
+            bayesian_prior = "medium.narrow") %>% as_tibble() %>% 
+  filter(Parameter1 == target) %>%
+  mutate(p.BH = p.adjust(p, method = "BH")) %>% 
+  mutate(p.holm = p.adjust(p, method = "holm")) %>% 
+  arrange(desc(abs(r)))
+  
+}
+
+```
+
+### Calculate
+
+```{r}
+# Execution time: ~
+
+df.corr.data <- df %>% filter(PainIntensity > 0)
+
+## Zero-order correlations
+tic()
+correlation.multi.0(df.corr.data, vars = list.vars.corr, covars = c("day"), target = "PainIntensity") -> df.corr.int.0
+df.corr.int.0
+correlation.multi.0(df.corr.data, vars = list.vars.corr, covars = c("day"), target = "PainUnpleasantness") -> df.corr.unpl.0
+df.corr.unpl.0
+# correlation.multi.0(df.corr.data, vars = list.vars.corr, covars = c("day"), target = "PainUnpleasantness") -> df.corr.uncpl.0
+# df.corr.uncpl.0
+toc()
+
+## First-order correlations
+tic()
+correlation.multi.0(df.corr.data, vars = list.vars.corr, covars = c("day","PainUnpleasantness"), target = "PainIntensity") -> df.corr.int.1
+df.corr.int.1
+correlation.multi.0(df.corr.data, vars = list.vars.corr, covars = c("day","PainIntensity"), target = "PainUnpleasantness") -> df.corr.unpl.1
+df.corr.unpl.1
+# correlation.multi.0(df.corr.data, vars = list.vars.corr, covars = c("day"), target = "PainUncoupling") -> df.corr.uncpl.0
+# df.corr.uncpl.0
+toc()
+
+## Partial correlations
+tic()
+correlation.multi.partial(df.corr.data, vars = c("day","PainUnpleasantness",list.vars.corr), target = "PainIntensity") -> df.corr.int.all
+df.corr.int.all
+correlation.multi.partial(df.corr.data, vars = c("day","PainIntensity",list.vars.corr), target = "PainUnpleasantness") -> df.corr.unpl.all
+df.corr.unpl.all
+# correlation.multi.partial(df.corr.data, vars = c("day",list.vars.corr), target = "PainUncoupling") -> df.corr.uncpl.all
+# df.corr.uncpl.all
+toc()
+
+```
+
+
+### Plot
+
+```{r, fig.width=3.75, fig.height=3.75}
+
+## Combine
+df.plot <- bind_rows(
+  df.corr.int.0 %>% mutate(type = "zero-order"),
+  df.corr.unpl.0 %>% mutate(type = "zero-order"),
+  # df.corr.uncpl.0 %>% mutate(type = "zero-order"),
+  df.corr.int.1 %>% mutate(type = "first-order\npartial"),
+  df.corr.unpl.1 %>% mutate(type = "first-order\npartial"),
+  # df.corr.uncpl.0 %>% mutate(type = "first-order\npartial"),
+  df.corr.int.all %>% mutate(type = "full-order\npartial"),
+  df.corr.unpl.all %>% mutate(type = "full-order\npartial"),
+  # df.corr.uncpl.all %>% mutate(type = "full-order\npartial")
+  ) %>% 
+  # --- removed unused correlations (covariates)
+  filter(!grepl("Pain",Parameter2), Parameter2 != "day") %>%
+  # --- correct for multiple comparison
+  group_by(Parameter1,type) %>% 
+  mutate(p.fdr = p.adjust(p, method = "fdr")) %>% 
+  mutate(p.holm = p.adjust(p, method = "holm")) %>% 
+  # --- correlation label
+  mutate(label.r = paste0(formatC(round(r,2), digits=2, format="f")),
+         label.r = str_replace(label.r, "0.", ".")) %>% 
+  # --- clean columns
+  rename(variable = Parameter2) %>% 
+  mutate(type = factor(type, levels = c("full-order\npartial","first-order\npartial","zero-order"))) %>% 
+  # --- add variable metadata
+  add_info %>% 
+  mutate(Parameter1 = paste0("Correlations with ",df.variables[Parameter1,"label"])) %>% 
+  arrange(domain)
+
+# --- define order of pheno dims
+vars.lvls <- (df.plot %>% 
+  filter(type == "zero-order") %>% 
+  group_by(domain,label) %>% summarise(r = mean(abs(r))) %>% 
+  arrange(domain,desc(r)))$label
+
+df.plot %<>% mutate(label = factor(label, levels = vars.lvls))
+
+## Plot
+tile.size <- .9
+df.plot %>% 
+  # --- mapping
+  ggplot(aes(x = label, y = (as.factor(type)), fill = r)) +
+  
+  # --- facets
+  facet_wrap(~ Parameter1, ncol = 1) +
+  
+  # --- data
+  geom_tile(aes(width = tile.size, height = tile.size)) +
+  geom_tile(data = . %>% filter(p.fdr < 5),
+            aes(width = tile.size, height = tile.size, color = (p.fdr > .05)), fill = NA, size = 0.5) +
+  geom_text(aes(label = label.r), size  = 2.3) +
+  
+  # --- indicators of psychological domains
+  annotate(geom = "segment", x = 1-tile.size/2, xend = 3+tile.size/2, y = 0.35, yend = 0.35, size = 1, color = cols.domains[["Conative"]]) +
+  annotate(geom = "segment", x = 4-tile.size/2, xend = 5+tile.size/2, y = 0.35, yend = 0.35, size = 1, color = cols.domains[["Affective"]]) +
+  annotate(geom = "segment", x = 6-tile.size/2, xend = 7+tile.size/2, y = 0.35, yend = 0.35, size = 1, color = cols.domains[["Attentional"]]) +
+  annotate(geom = "segment", x = 8-tile.size/2, xend = 10+tile.size/2, y = 0.35, yend = 0.35, size = 1, color = cols.domains[["Meta-cognitive"]]) +
+  
+  # --- arrow indicating direction of increasing specificity
+  annotate(geom = "segment", x = 10.8, xend = 10.8, y = 3.3, yend = 0.7, arrow = arrow(length = unit(2,"mm"))) +
+  annotate(geom = "text", label = "increasing\nspecificity", x = Inf, y = 2, 
+           angle = -90, hjust = 0.5, vjust = 0, size = 2.5, lineheight = 0.8) + 
+  
+  # --- aesthetics
+  expand_limits(x = 11) +
+
+  scale_color_manual(name = "", values = c(`FALSE`="grey10", `TRUE`="white"),
+                     labels = c(`FALSE`="p(FDR) < .05", `TRUE`="")) +
+  scale_fill_gradientn(name = "Spearman rho",
+                       colors = pals::brewer.rdbu(10)[2:9],
+                       breaks = round(seq(-.3,.3,.1),1), limits = c(-.30,.30),
+                       labels = ~weights::rd(as.numeric(.),digits=1,max=1)) +
+  guides(color = guide_legend(theme = theme(legend.key.height  = unit(0.5, "lines"),
+                                            legend.key.width  = unit(0.5, "lines")))) +
+  coord_equal(clip = "off") +
+  theme(panel.grid = element_blank(),
+        strip.text = element_text(hjust = 0),
+        axis.title = element_blank(),
+        legend.position = "bottom",
+        legend.key.height  = unit(0.5, "lines"),
+        legend.box.margin = margin(t = -10),
+        legend.spacing.x = unit(0,"mm"),
+        axis.text.x = element_text(angle = 30, hjust = 1, size = 8, margin = margin(t=1, unit="mm"), family = "Ubuntu Condensed")) -> g.pain.corr.pheno
+
+g.pain.corr.pheno
+
+```
+
+## **Figure 6**
+
+```{r, fig.width=7.54, fid.height = 4}
+
+layout <- "
+AACC
+AACC
+BBCC
+"
+
+(
+  (g.pain.int.unpl.both +
+     labs(title = "Temporal evolution of pain ratings") + 
+     coord_cartesian(clip = "off")) + #+ (g.pain.uncpl + theme(axis.title.y = element_blank()) + plot_layout(tag_level = 'new')
+  free(g.pain.corr.quest +
+     labs(title = "B   Correlations (partial) with trait measures ") +
+     theme(plot.title = element_text(size = 10, hjust = 0.9)))
+) + 
+  (g.pain.corr.pheno + 
+     labs(title = "Correlations with other phenomenological dimensions") +
+     theme(#plot.margin = unit(c(0,0,0,30), "points"),
+           plot.title = element_text(margin = margin(l=-10)),
+           strip.text = element_text(margin = margin(t=5, b=0)))) +
+  
+  plot_layout(design = layout, widths = c(1,1,1.2)) +
+  plot_annotation(tag_levels = list(c("A","\nB  ","C"))) & 
+  
+  theme(plot.title = element_text(face = "bold"),
+        plot.tag.position = c(0.05, 1),
+        plot.tag = element_text(face = "bold", size = 11, hjust = 1, vjust = 1)) -> g
+
+g
+
+
+
+ggsave(g, filename = "../figures/fig6.pdf",
+       width = 190, height = 100, units = "mm")
+
+# ggsave(g, filename = "../figures/fig6.png",
+#        width = 190, height = 100, units = "mm")
+```
