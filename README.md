@@ -10,9 +10,9 @@ This repository contains the scripts required to reproduce analyses, results and
 
 # Steps
 
-1. download the scripts
-2. create a folder called `data` in the folder containing the scripts.
-3. download the [data from OSF](https://osf.io/4wbk3/) and save it in `data`
+1. Download the scripts
+2. Create a folder called `data` in the folder containing the scripts.
+3. Download the [data from OSF](https://osf.io/4wbk3/) (requires an OSF account and an access request) and save it in `data`
 4. Execute the .qmd file
 
 # Files
